@@ -503,6 +503,15 @@ def test_anthropic_link_clears_env_and_writes_secret_free_marker(monkeypatch, tm
     assert marker["source"] == "claude_code_linked"
     assert "access_token" not in marker
     assert "refresh_token" not in marker
+    link_marker = tmp_path / ".claude_code_linked"
+    assert link_marker.read_text(encoding="utf-8") == "claude_code_linked\n"
+    assert _provider_oauth_authenticated("anthropic", tmp_path) is True
+    assert _provider_oauth_authenticated("claude-code", tmp_path) is True
+
+    # Hermes Agent may legitimately prune tokenless credential-pool entries.
+    # The profile-scoped file marker must preserve the linked status without
+    # copying Claude Code's OAuth tokens into WebUI-owned state.
+    (tmp_path / "auth.json").write_text('{"credential_pool": {}}', encoding="utf-8")
     assert _provider_oauth_authenticated("anthropic", tmp_path) is True
     assert _provider_oauth_authenticated("claude-code", tmp_path) is True
 
