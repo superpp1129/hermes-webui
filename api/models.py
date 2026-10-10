@@ -5120,6 +5120,13 @@ def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_w
         return True
     if not show_kanban and source == 'kanban':
         return True
+    # Delegated children are implementation detail/transcript evidence under
+    # their parent session, not independent chats the user started. Showing
+    # every council/review leaf in the main sidebar turns one engagement into
+    # dozens of blank-title rows. They remain addressable from lineage/direct
+    # links and in state.db; only the default sidebar hides them.
+    if source == 'subagent':
+        return True
     if bool(session.get('pre_compression_snapshot')):
         return not bool(session.get('_show_pre_compression_snapshot'))
     return False
@@ -5173,7 +5180,7 @@ def _is_intentionally_background_sidebar_session(session: dict) -> bool:
         or session.get('raw_source')
         or session.get('session_source')
     )
-    return source in {'cron', 'webhook', 'kanban'} or sid.startswith('cron_')
+    return source in {'cron', 'webhook', 'kanban', 'subagent'} or sid.startswith('cron_')
 
 
 def _include_project_hidden_background_sidebar_sessions(

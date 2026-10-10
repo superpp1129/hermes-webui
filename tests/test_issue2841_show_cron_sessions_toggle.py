@@ -54,6 +54,17 @@ def test_kanban_does_not_leak_when_other_toggles_enabled():
     ) is True
 
 
+def test_subagent_children_are_hidden_from_default_sidebar():
+    assert _hide_from_default_sidebar(
+        {
+            'source_tag': 'subagent',
+            'session_id': '20260901_child',
+            'parent_session_id': 'webui-parent',
+            'message_count': 20,
+        }
+    ) is True
+
+
 def test_pre_compression_always_hidden_regardless_of_background_toggles():
     assert _hide_from_default_sidebar({'pre_compression_snapshot': True}, show_cron=True, show_webhook=True) is True
 
