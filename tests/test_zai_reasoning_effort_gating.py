@@ -173,7 +173,7 @@ def test_glm_5_2_status_offers_effort_ladder_and_toggle():
     st = _reasoning_status("glm-5.2")
     assert st["supports_reasoning_effort"] is True
     assert set(st["supported_efforts"]) == {
-        "minimal", "low", "medium", "high", "xhigh", "max"
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
     }
     assert st["supports_thinking_toggle"] is True
 
@@ -187,8 +187,8 @@ def test_sub_5_2_glm_status_keeps_thinking_toggle_without_effort_ladder(model_id
     the effort ladder is empty — otherwise the composer hides the whole chip and
     silently regresses the working thinking control."""
     st = _reasoning_status(model_id)
-    assert st["supported_efforts"] == [], (
-        f"{model_id} must not advertise an effort ladder"
+    assert st["supported_efforts"] == ["none"], (
+        f"{model_id} must offer the off control without advertising an effort ladder"
     )
     assert st["supports_reasoning_effort"] is False
     assert st["supports_thinking_toggle"] is True, (

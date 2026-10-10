@@ -4374,6 +4374,12 @@ def get_reasoning_status(
         resolve_model, resolve_provider
     )
     supports_thinking_toggle = bool(supported_efforts) or (zai_thinking is True)
+    # Native clients build their picker directly from supported_efforts, unlike
+    # the browser which adds None itself. Include that existing control without
+    # changing the internal effort ladder or the toggle-only capability flags.
+    picker_efforts = list(supported_efforts)
+    if supports_thinking_toggle and "none" not in picker_efforts:
+        picker_efforts.insert(0, "none")
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
@@ -4385,7 +4391,7 @@ def get_reasoning_status(
             provider_id=resolve_provider,
             base_url=resolve_base_url,
         ),
-        "supported_efforts": supported_efforts,
+        "supported_efforts": picker_efforts,
         "supports_reasoning_effort": bool(supported_efforts),
         # Whether the composer should render ANY reasoning control. True for any
         # effort-capable model OR a ZAI GLM model that accepts the thinking
