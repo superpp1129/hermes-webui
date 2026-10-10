@@ -400,7 +400,7 @@ def test_get_reasoning_status_includes_supported_efforts(monkeypatch):
         model_id="gpt-5.5",
         provider_id="openai-codex",
     )
-    assert status["supported_efforts"] == ["low", "medium", "high"]
+    assert status["supported_efforts"] == ["none", "low", "medium", "high"]
     assert status["supports_reasoning_effort"] is True
 
 
@@ -409,9 +409,18 @@ def test_get_reasoning_status_for_reasoning_capable_model_has_no_max():
         model_id="gpt-5.5",
         provider_id="openai-codex",
     )
-    assert status["supported_efforts"] == ["minimal", "low", "medium", "high", "xhigh"]
+    assert status["supported_efforts"] == ["none", "minimal", "low", "medium", "high", "xhigh"]
     assert status["supports_reasoning_effort"] is True
     assert "max" not in status["supported_efforts"]
+
+
+def test_get_reasoning_status_does_not_duplicate_configured_none(monkeypatch):
+    monkeypatch.setattr(cfg, "_load_yaml_config_file", lambda *a, **k: {})
+    efforts = ["none", "low", "high"]
+    monkeypatch.setattr(cfg, "resolve_model_reasoning_efforts", lambda *a, **k: efforts)
+    status = cfg.get_reasoning_status(model_id="grok-4.7", provider_id="xai-oauth")
+    assert status["supported_efforts"] == efforts
+    assert efforts == ["none", "low", "high"]
 
 
 def test_get_reasoning_status_coerces_stale_max_to_xhigh(monkeypatch):
