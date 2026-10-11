@@ -10952,6 +10952,57 @@ def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
     return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
 
 
+def _resolve_agent_max_iterations(
+    config,
+    *,
+    requested_provider=None,
+    resolved_provider=None,
+):
+    """Resolve the WebUI agent turn cap, preferring an exact provider override.
+
+    Named custom providers are canonicalized to ``custom`` before AIAgent is
+    constructed, so inspect the preserved requested identity first.  A value
+    less than or equal to zero means unlimited, matching ``agent.max_turns``.
+    Invalid overrides fall back to the global setting instead of silently
+    removing its limit.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    agent_cfg = cfg.get('agent', {})
+    agent_cfg = agent_cfg if isinstance(agent_cfg, dict) else {}
+
+    provider_ids = []
+    for provider in (requested_provider, resolved_provider):
+        normalized = str(provider or '').strip().lower()
+        if normalized and normalized not in provider_ids:
+            provider_ids.append(normalized)
+
+    overrides = agent_cfg.get('max_turns_by_provider')
+    if isinstance(overrides, dict):
+        normalized_overrides = {
+            str(key).strip().lower(): value
+            for key, value in overrides.items()
+            if str(key).strip()
+        }
+        for provider_id in provider_ids:
+            if provider_id not in normalized_overrides:
+                continue
+            try:
+                parsed = int(normalized_overrides[provider_id])
+            except (TypeError, ValueError):
+                break
+            return parsed if parsed > 0 else None
+
+    raw = agent_cfg.get('max_turns')
+    if raw is None:
+        # Back-compat for older Hermes config files.
+        raw = cfg.get('max_turns')
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _compute_agent_cache_signature(
     resolved_model: str | None,
     resolved_api_key: str | None,
@@ -13043,28 +13094,14 @@ def _run_agent_streaming(
             import inspect as _inspect
             _agent_params = set(_inspect.signature(_AIAgent.__init__).parameters)
 
-            # CLI-parity max-iteration budget: read config.yaml's
-            # agent.max_turns and pass it to AIAgent when supported. Without
-            # this WebUI-created agents silently use AIAgent's constructor
-            # default (90), so long browser-originated tasks hit the
-            # "maximum number of tool-calling iterations" summary path even
-            # after the operator raises Hermes' global turn budget.
-            _max_iterations_cfg = None
-            try:
-                _raw_max_iterations = None
-                _agent_cfg_for_iterations = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
-                if isinstance(_agent_cfg_for_iterations, dict):
-                    _raw_max_iterations = _agent_cfg_for_iterations.get('max_turns')
-                if _raw_max_iterations is None and isinstance(_cfg, dict):
-                    # Back-compat for older Hermes config files that used a
-                    # root-level max_turns key.
-                    _raw_max_iterations = _cfg.get('max_turns')
-                if _raw_max_iterations is not None:
-                    _parsed_max_iterations = int(_raw_max_iterations)
-                    if _parsed_max_iterations > 0:
-                        _max_iterations_cfg = _parsed_max_iterations
-            except Exception:
-                _max_iterations_cfg = None
+            # CLI-parity max-iteration budget with an optional exact-provider
+            # override. The preserved requested identity distinguishes named
+            # custom routes after their runtime provider becomes ``custom``.
+            _max_iterations_cfg = _resolve_agent_max_iterations(
+                _cfg,
+                requested_provider=_session_requested_provider,
+                resolved_provider=resolved_provider,
+            )
 
             # CLI-parity max output cap: read config.yaml's max_tokens and pass
             # it to AIAgent when supported. Without this WebUI-created agents use
