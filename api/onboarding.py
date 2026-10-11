@@ -682,6 +682,13 @@ def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
     if provider not in _known_oauth_providers:
         return False
 
+    # Claude Code keeps its OAuth token in its own protected credential store.
+    # Linking must therefore be represented by a secret-free profile marker,
+    # not a tokenless credential_pool entry (the Agent legitimately prunes
+    # such entries).  Retain credential_pool support below for older links.
+    if provider == "anthropic" and (hermes_home / ".claude_code_linked").is_file():
+        return True
+
     try:
         import json as _j
 

@@ -62,6 +62,7 @@ _OAUTH_FLOWS_LOCK = threading.Lock()
 _OAUTH_START_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _OAUTH_START_LOCKS_LOCK = threading.Lock()
 _ANTHROPIC_ENV_KEYS = ("ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY")
+_ANTHROPIC_LINK_MARKER = ".claude_code_linked"
 
 
 def _oauth_start_key(provider: str, hermes_home: Path) -> tuple[str, str]:
@@ -369,6 +370,19 @@ def _link_anthropic_credentials(hermes_home: Path) -> None:
     """
     _clear_anthropic_env_values(hermes_home)
 
+    # Keep a profile-scoped, secret-free marker outside credential_pool.
+    # Current Hermes Agent versions prune pool entries that do not contain
+    # token material, which made the prior marker disappear moments after a
+    # successful link.  The actual OAuth tokens remain solely in Claude
+    # Code's protected credential store; this file records only the user's
+    # choice to link that store to this Hermes profile.
+    link_marker = Path(hermes_home) / _ANTHROPIC_LINK_MARKER
+    link_marker.write_text("claude_code_linked\n", encoding="utf-8")
+    try:
+        link_marker.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
     # Write a pool marker (no secrets) so onboarding status can detect linkage.
     auth_path = Path(hermes_home) / "auth.json"
     auth = _read_auth_json(auth_path)
@@ -512,6 +526,11 @@ def _run_anthropic_credential_worker(flow_id: str) -> None:
 
 def _remove_anthropic_link_marker(hermes_home: Path) -> None:
     """Remove the secret-free Claude Code linked marker after a cancelled race."""
+    try:
+        (Path(hermes_home) / _ANTHROPIC_LINK_MARKER).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Failed to remove Anthropic link marker", exc_info=True)
+
     auth_path = Path(hermes_home) / "auth.json"
     auth = _read_auth_json(auth_path)
     pool = auth.get("credential_pool")

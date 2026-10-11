@@ -31,7 +31,7 @@ import api.config as cfg
 
 def test_glm_5_2_native_zai_keeps_full_ladder():
     efforts = cfg.resolve_model_reasoning_efforts("glm-5.2", provider_id="zai")
-    # Z.AI's accepted values match VALID_REASONING_EFFORTS exactly.
+    # Z.AI's documented native ladder tops out at max.
     assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh", "max"}
 
 
@@ -169,12 +169,10 @@ def _reasoning_status(model_id, provider_id="zai"):
 
 
 def test_glm_5_2_status_offers_effort_ladder_and_toggle():
-    """GLM-5.2: full effort ladder AND thinking toggle both available."""
+    """The manual picker stays available while wire capability remains gated."""
     st = _reasoning_status("glm-5.2")
     assert st["supports_reasoning_effort"] is True
-    assert set(st["supported_efforts"]) == {
-        "minimal", "low", "medium", "high", "xhigh", "max"
-    }
+    assert st["supported_efforts"] == list(cfg.MANUAL_REASONING_EFFORTS)
     assert st["supports_thinking_toggle"] is True
 
 
@@ -182,50 +180,39 @@ def test_glm_5_2_status_offers_effort_ladder_and_toggle():
     "model_id",
     ["glm-4.6", "glm-4.5", "glm-4.5-flash", "glm-5", "glm-5.1", "glm-5-turbo"],
 )
-def test_sub_5_2_glm_status_keeps_thinking_toggle_without_effort_ladder(model_id):
-    """#6219 round-2: GLM-4.5–5.1 must keep the thinking on/off toggle even though
-    the effort ladder is empty — otherwise the composer hides the whole chip and
-    silently regresses the working thinking control."""
+def test_sub_5_2_glm_status_keeps_manual_picker(model_id):
+    """The UI stays stable even when the native wire omits reasoning_effort."""
     st = _reasoning_status(model_id)
-    assert st["supported_efforts"] == [], (
-        f"{model_id} must not advertise an effort ladder"
-    )
-    assert st["supports_reasoning_effort"] is False
-    assert st["supports_thinking_toggle"] is True, (
-        f"{model_id} accepts thinking:{type:enabled|disabled} per Z.AI docs; the "
-        "composer must still render an On/None control when the ladder is empty"
-    )
+    assert st["supported_efforts"] == list(cfg.MANUAL_REASONING_EFFORTS)
+    assert st["supports_reasoning_effort"] is True
+    assert st["supports_thinking_toggle"] is True
 
 
-def test_glm_4_7_status_offers_neither_toggle_nor_ladder():
-    """GLM-4.7 forced thinking: the composer must hide the chip entirely."""
+def test_glm_4_7_status_keeps_manual_picker_visible():
+    """Manual controls remain visible; the adapter owns forced-thinking rules."""
     st = _reasoning_status("glm-4.7")
-    assert st["supported_efforts"] == []
-    assert st["supports_reasoning_effort"] is False
-    assert st["supports_thinking_toggle"] is False, (
-        "glm-4.7 forces thinking on — no on/off toggle should be offered"
-    )
+    assert st["supported_efforts"] == list(cfg.MANUAL_REASONING_EFFORTS)
+    assert st["supports_reasoning_effort"] is True
+    assert st["supports_thinking_toggle"] is True
 
 
 @pytest.mark.parametrize("alias", ["glm", "z-ai", "z.ai", "zhipu"])
 def test_thinking_toggle_aliases_resolve_through_same_gate(alias):
-    """All ZAI aliases must produce the same thinking-toggle verdict as native zai."""
+    """All ZAI aliases retain the stable manual picker."""
     st_glm_4_6 = _reasoning_status("glm-4.6", provider_id=alias)
     st_glm_4_7 = _reasoning_status("glm-4.7", provider_id=alias)
     assert st_glm_4_6["supports_thinking_toggle"] is True
-    assert st_glm_4_7["supports_thinking_toggle"] is False
+    assert st_glm_4_7["supports_thinking_toggle"] is True
 
 
-def test_non_zai_status_toggle_defaults_to_effort_capability():
-    """For non-zai providers, supports_thinking_toggle must mirror effort
-    capability (the prior behavior) — no separate ZAI gate fires."""
+def test_non_zai_status_also_keeps_manual_picker():
     # An effort-capable model on a non-zai provider.
     st = _reasoning_status("gpt-5", provider_id="openai")
-    assert st["supports_thinking_toggle"] == st["supports_reasoning_effort"]
+    assert st["supports_thinking_toggle"] is True
     # A non-effort model on a non-zai provider: toggle also False (no ZAI gate).
     st2 = _reasoning_status("gpt-4o", provider_id="openai")
-    assert st2["supports_thinking_toggle"] is False
-    assert st2["supports_reasoning_effort"] is False
+    assert st2["supports_thinking_toggle"] is True
+    assert st2["supports_reasoning_effort"] is True
 
 
 # ── Aliases resolve through the same gate ────────────────────────────────────────
@@ -271,7 +258,9 @@ def test_non_glm_model_on_zai_provider_unaffected():
     # non-GLM models fall through unchanged. (The OpenAI-family ceiling does NOT
     # fire here because that branch is keyed on provider, not model family.)
     efforts = cfg.resolve_model_reasoning_efforts("gpt-5", provider_id="zai")
-    assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh", "max"}
+    assert set(efforts) == {
+        "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+    }
 
 
 # ── Coercion agrees with advertising (UI/coercion invariant) ─────────────────────
@@ -396,20 +385,16 @@ def test_resolve_reattaches_none_for_thinking_tier():
 
 
 def test_get_reasoning_status_forced_glm_with_stored_none_reports_default():
-    """End-to-end gap #2: GLM-4.7 with agent.reasoning_effort=none configured
-    must report reasoning_effort='' (default = thinking on), not 'none'."""
+    """The picker reports the saved override; streaming applies forced thinking."""
     import unittest.mock as mock
     with mock.patch(
         "api.config._load_yaml_config_file",
         return_value={"agent": {"reasoning_effort": "none"}},
     ):
         st = cfg.get_reasoning_status(model_id="glm-4.7", provider_id="zai")
-    assert st["reasoning_effort"] == "", (
-        f"forced-thinking glm-4.7 with stored 'none' must report '' (default = "
-        f"thinking on); got {st['reasoning_effort']!r}"
-    )
-    assert st["supports_thinking_toggle"] is False
-    assert st["supported_efforts"] == []
+    assert st["reasoning_effort"] == "none"
+    assert st["supports_thinking_toggle"] is True
+    assert st["supported_efforts"] == list(cfg.MANUAL_REASONING_EFFORTS)
 
 
 # ── Round-3: set_reasoning_effort accepts empty (gap #1 backend) ────────────────

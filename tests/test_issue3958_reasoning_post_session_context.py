@@ -9,7 +9,7 @@ def read(path):
     return Path(path).read_text(encoding="utf-8")
 
 
-def test_set_reasoning_effort_returns_status_for_explicit_model(tmp_path, monkeypatch):
+def test_set_reasoning_effort_returns_stable_manual_status(tmp_path, monkeypatch):
     cfgfile = tmp_path / "config.yaml"
     cfgfile.write_text(
         yaml.safe_dump(
@@ -24,32 +24,14 @@ def test_set_reasoning_effort_returns_status_for_explicit_model(tmp_path, monkey
     monkeypatch.setattr(cfg, "_get_config_path", lambda: cfgfile)
     monkeypatch.setattr(cfg, "reload_config", lambda: None)
 
-    seen = {}
-
-    def fake_resolve(model_id, provider_id=None, base_url=None):
-        seen["args"] = (model_id, provider_id, base_url)
-        if model_id == "claude-opus-4-7":
-            return ["minimal", "low", "medium", "high", "xhigh", "max"]
-        return []
-
-    monkeypatch.setattr(cfg, "resolve_model_reasoning_efforts", fake_resolve)
-
     status = cfg.set_reasoning_effort(
         "high",
         model_id="claude-opus-4-7",
         provider_id="anthropic",
     )
 
-    assert seen["args"] == ("claude-opus-4-7", "anthropic", None)
     assert status["reasoning_effort"] == "high"
-    assert status["supported_efforts"] == [
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-    ]
+    assert status["supported_efforts"] == list(cfg.MANUAL_REASONING_EFFORTS)
 
 
 def test_ui_posts_reasoning_context_with_effort():

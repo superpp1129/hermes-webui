@@ -5760,25 +5760,9 @@ function _reasoningEffortQuery(){
 function _applyReasoningOptions(supportedEfforts){
   const dd=$('composerReasoningDropdown');
   if(!dd) return;
-  const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
-    const effort=opt.dataset.effort;
-    // 'none' (turn thinking off) and '' (Default = clear override, provider
-    // default = thinking on) are meta-options outside the effort ladder. They
-    // are always shown so a thinking-toggle-only model (GLM-4.5–5.1 on native
-    // zai, where the ladder is empty) still has an operable two-state control:
-    // Default (on) + None (off). Without the Default option the toggle is
-    // one-way off-only — the user can disable thinking but cannot re-enable it.
-    // (#6219 round-3)
-    if(effort==='none'||effort===''){
-      opt.style.display='';
-      return;
-    }
-    if(!supported.size){
-      opt.style.display='none';
-      return;
-    }
-    opt.style.display=supported.has(effort)?'':'none';
+    // Manual full range: discovery failures must not hide local-model controls.
+    opt.style.display='';
   });
 }
 
@@ -5807,20 +5791,7 @@ function _applyReasoningChip(eff){
   const supportedEfforts=(typeof _currentReasoningEffortsSupported==='undefined')
     ?null
     :_currentReasoningEffortsSupported;
-  const toggleSupported=(typeof _currentReasoningToggleSupported==='undefined')
-    ?true
-    :_currentReasoningToggleSupported;
-  const hasEffortLadder=Array.isArray(supportedEfforts)
-    ?supportedEfforts.length>0
-    :true;
-  // Show the chip if there is an effort ladder OR a thinking toggle is still
-  // available. Only hide when the model supports neither.
-  const supports=hasEffortLadder||toggleSupported;
-  if(!supports){
-    wrap.style.display='none';
-    if(mobileAction) mobileAction.style.display='none';
-    return;
-  }
+  // Keep manual reasoning controls visible for every provider/model.
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
   if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
@@ -5830,7 +5801,7 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    const labelText='Reasoning effort: '+text;
+    const labelText='Reasoning effort: '+text+(meta&&meta.reasoning_note?' — '+meta.reasoning_note:'');
     chip.title=labelText;
     chip.setAttribute('aria-label',labelText);
   }
@@ -5979,16 +5950,23 @@ document.addEventListener('click',function(e){
     // silently ignore the Default click and leave the toggle one-way off-only.
     // (#6219 round-3)
     if(opt){
+      if(opt.style.display==='none') return;
+      const requestKey=_reasoningEffortQuery();
       const payload=Object.assign({effort:effort},_reasoningEffortContext());
       api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
+          if(requestKey!==_reasoningEffortQuery()) return;
           // For Default (effort=''), the returned reasoning_effort is '' (clear)
           // — display 'Default' rather than an empty toast.
-          const display=(st&&st.reasoning_effort)||effort||'Default';
-          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
+          const actual=st&&typeof st.reasoning_effort==='string'?st.reasoning_effort:'';
+          const display=_formatReasoningEffortLabel(actual);
+          _applyReasoningChip(actual, st||{});
           showToast('🧠 Reasoning effort set to '+display);
         })
-        .catch(function(){showToast('🧠 Failed to set effort');});
+        .catch(function(err){
+          if(requestKey!==_reasoningEffortQuery()) return;
+          showToast('🧠 '+(err&&err.message?err.message:'Failed to set effort'));
+        });
       closeReasoningDropdown();
     }
   }

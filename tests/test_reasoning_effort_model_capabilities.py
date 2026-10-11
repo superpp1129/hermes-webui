@@ -390,7 +390,7 @@ def test_nested_route_deny_is_boundary_based_not_prefix_based():
         assert cfg._nested_route_reasoning_denied(model) is False, model
 
 
-def test_get_reasoning_status_includes_supported_efforts(monkeypatch):
+def test_get_reasoning_status_keeps_manual_picker_stable(monkeypatch):
     monkeypatch.setattr(
         cfg,
         "resolve_model_reasoning_efforts",
@@ -400,24 +400,22 @@ def test_get_reasoning_status_includes_supported_efforts(monkeypatch):
         model_id="gpt-5.5",
         provider_id="openai-codex",
     )
-    assert status["supported_efforts"] == ["low", "medium", "high"]
+    assert status["supported_efforts"] == list(cfg.MANUAL_REASONING_EFFORTS)
     assert status["supports_reasoning_effort"] is True
 
 
-def test_get_reasoning_status_for_reasoning_capable_model_has_no_max():
+def test_get_reasoning_status_exposes_full_manual_picker():
     status = cfg.get_reasoning_status(
         model_id="gpt-5.5",
         provider_id="openai-codex",
     )
-    assert status["supported_efforts"] == ["minimal", "low", "medium", "high", "xhigh"]
+    assert status["supported_efforts"] == list(cfg.MANUAL_REASONING_EFFORTS)
     assert status["supports_reasoning_effort"] is True
-    assert "max" not in status["supported_efforts"]
+    assert "ultra" in status["supported_efforts"]
 
 
-def test_get_reasoning_status_coerces_stale_max_to_xhigh(monkeypatch):
-    """A previously-saved `agent.reasoning_effort: max` (no longer a valid effort)
-    must be reported as the coerced `xhigh`, not the raw stale `max`, so the
-    boot/status/chip read paths agree with what streaming actually sends."""
+def test_get_reasoning_status_preserves_requested_manual_level(monkeypatch):
+    """The picker reports the saved override; streaming performs wire coercion."""
     monkeypatch.setattr(
         cfg,
         "_load_yaml_config_file",
@@ -427,8 +425,7 @@ def test_get_reasoning_status_coerces_stale_max_to_xhigh(monkeypatch):
         model_id="gpt-5.5",
         provider_id="openai-codex",
     )
-    assert status["reasoning_effort"] == "xhigh"
-    assert status["reasoning_effort"] != "max"
+    assert status["reasoning_effort"] == "max"
 
 
 def test_max_effort_degrades_to_xhigh_for_gemini():
