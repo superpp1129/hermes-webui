@@ -10207,7 +10207,7 @@ def _run_agent_streaming(
                 _effort = coerce_reasoning_effort_for_model(
                     _effort_raw,
                     resolved_model,
-                    provider_id=resolved_provider,
+                    provider_id=_session_requested_provider or resolved_provider,
                     base_url=resolved_base_url,
                 )
                 _reasoning_config = parse_reasoning_effort(_effort)

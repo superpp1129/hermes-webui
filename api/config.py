@@ -3357,7 +3357,125 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 # importing from the agent tree (which may not be installed).  Any drift here
 # will show up in the shared test suite since both sides accept the same set.
 # Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _reasoning_capability(model_id=None, provider_id=None, base_url=None) -> dict:
+    """Exact route capabilities, not the union of every provider's vocabulary.
+
+    Config declarations and cached provider catalogs are authoritative. Boolean
+    'supports reasoning' metadata is NOT proof of individual levels or of an
+    off switch. Unknown routes retain Default without advertising guessed levels.
+    No credentialed probes or inference are performed here.
+    """
+    model = str(model_id or "").strip()
+    provider = str(provider_id or "").strip().lower()
+    if not model:
+        model_cfg = cfg.get("model") or {}
+        model = str(model_cfg.get("default") or "")
+        provider = provider or str(model_cfg.get("provider") or "")
+    if not provider and model:
+        try:
+            model, provider, _ = resolve_model_provider(model)
+        except Exception:
+            provider = ""
+    provider = _resolve_provider_alias(provider)
+    model = _strip_provider_hint_for_reasoning(model, provider)
+    bare = model.lower().rsplit("/", 1)[-1]
+    levels = None
+    source = "unknown"
+    wire = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+    if provider in {"cursor-acp", "copilot-acp"} or _nested_route_reasoning_denied(model):
+        levels, source = [], "unsupported"
+    elif provider in _OPENAI_FAMILY_REASONING_PROVIDERS and bare.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4")):
+        from agent.reasoning_effort import codex_supported_efforts
+        levels, source = list(codex_supported_efforts(bare)), "adapter"
+        if provider == "openai-codex":
+            codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
+            try:
+                entries = json.loads((codex_home / "models_cache.json").read_text()).get("models", [])
+                for entry in entries:
+                    if entry.get("slug") != model:
+                        continue
+                    declared = entry.get("supported_reasoning_levels")
+                    if isinstance(declared, list) and declared:
+                        values = [e.get("effort") if isinstance(e, dict) else e for e in declared]
+                        # Ultra is an internal alias, not an additional wire tier.
+                        values = ["max" if e == "ultra" else e for e in values]
+                        levels = [e for e in levels if e in values]
+                        source = "codex catalog + adapter"
+                    break
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+    elif provider in {"xai", "x-ai", "grok", "xai-oauth"}:
+        # The OAuth web route does not expose API effort controls.
+        if provider != "xai-oauth" and bare.startswith(("grok-4.5", "grok-4.6", "grok-4.7")):
+            levels = ["low", "medium", "high"] + ([] if bare.startswith("grok-4.5") else ["xhigh"])
+            source = "native API"
+    elif provider in {"zai", "glm-subscription"}:
+        if bare.startswith("glm-5.3"):
+            levels, source = ["low", "high", "max"], "native API"
+        elif bare.startswith("glm-5.2"):
+            levels, source = ["none", "high", "max"], "native API"
+        elif _zai_glm_classification(model, "zai") == "thinking":
+            levels, source = ["none"], "thinking toggle"
+        elif _zai_glm_classification(model, "zai") == "forced":
+            levels, source = [], "mandatory thinking"
+    elif provider in {"gemini", "google", "google-gemini"}:
+        from agent.transports.chat_completions import gemini_supported_efforts
+        levels = gemini_supported_efforts(bare)
+        if levels is not None:
+            levels, source = list(levels), "native API + adapter"
+    elif provider in {"anthropic", "claude", "anthropic-claude"} and "claude" in bare:
+        from agent.anthropic_adapter import (
+            _supports_adaptive_thinking, _supports_xhigh_effort,
+            _accepts_thinking_disable, THINKING_BUDGET,
+        )
+        if "haiku" in bare:
+            # The installed Messages adapter skips Haiku effort controls.
+            levels = None
+        elif _supports_adaptive_thinking(bare) and re.match(
+            r"^claude-(?:(?:opus|sonnet)[-.](?:4[.-][678]|5(?:[.-]5)?)|(?:fable|mythos)[-.](?:5(?:[.-]1)?|preview))(?:$|[-.])", bare
+        ):
+            levels = ["low", "medium", "high"]
+            if _supports_xhigh_effort(bare):
+                levels.append("xhigh")
+            levels.append("max")
+            if _accepts_thinking_disable(bare):
+                levels.insert(0, "none")
+        elif not _supports_adaptive_thinking(bare) and bare.startswith(("claude-3-7", "claude-sonnet-4", "claude-opus-4")):
+            levels = ["none", *[e for e in VALID_REASONING_EFFORTS if e in THINKING_BUDGET]]
+        elif not _supports_adaptive_thinking(bare):
+            levels = []
+        source = "adapter" if levels is not None else "unknown"
+    elif provider == "openrouter":
+        from hermes_cli.models import openrouter_model_reasoning_capabilities
+        caps = openrouter_model_reasoning_capabilities(model, allow_fetch=False)
+        if caps is not None:
+            levels = []
+            if caps.get("supports_reasoning"):
+                declared = caps.get("supported_efforts")
+                levels = list(declared) if isinstance(declared, list) else None
+                if levels is not None and caps.get("mandatory"):
+                    levels = [e for e in levels if e != "none"]
+            source = "provider catalog"
+
+    # Model-specific declaration wins over provider defaults, including [].
+    entry = (cfg.get("providers") or {}).get(provider, {})
+    if provider.startswith("custom:"):
+        entry = next((e for e in _custom_provider_entries()
+                      if _custom_provider_slug_from_name(e.get("name")) == provider), {})
+    for declared in _configured_reasoning_effort_lists(entry, model):
+        if isinstance(declared, list):
+            values = list(dict.fromkeys(str(e).strip().lower() for e in declared
+                                        if str(e).strip().lower() in wire))
+            if not declared or values:
+                levels = values if levels is None else [e for e in values if e in levels]
+                source = "configured" if source == "unknown" else source + " + configured"
+                break
+    return {"known": levels is not None,
+            "efforts": [e for e in (levels or []) if e in wire],
+            "source": source, "model": model, "provider": provider}
 
 
 def parse_reasoning_effort(effort):
@@ -4052,34 +4170,8 @@ def resolve_model_reasoning_efforts(
     provider_id: str | None = None,
     base_url: str | None = None,
 ) -> list[str]:
-    """Return supported reasoning-effort levels for *model_id*, or [] if none.
-
-    Always passes the sourced list through _filter_reasoning_efforts_for_provider
-    so the hard provider ceilings (OpenAI-family GPT-5 before 5.6 at xhigh and
-    o-series at high; Gemini + pre-adaptive/cloud-hosted Claude at xhigh) are
-    applied uniformly. The UI dropdown and coercion therefore agree: ``max`` is
-    retained for GPT-5.6 and other models whose native ladder includes it, and
-    stripped where it would be rejected or mishandled.
-    """
-    raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
-    if not raw:
-        return raw
-    # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
-    # disabled, so the 'none' sentinel must NOT appear in their supported list —
-    # otherwise the UI offers an "off" option that has no effect and contradicts
-    # the forced-tier contract. (#6219 round-3)
-    if _zai_glm_classification(model_id, provider_id) == "forced":
-        return []
-    # Preserve any explicit 'none' sentinel (valid UI option = "no reasoning");
-    # the ceiling filter only knows the reasoning LEVELS.
-    had_none = "none" in raw
-    filtered = _filter_reasoning_efforts_for_provider(
-        [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
-    )
-    if had_none:
-        # Keep 'none' in its original leading position if it was there.
-        return ["none", *filtered] if raw and raw[0] == "none" else [*filtered, "none"]
-    return filtered
+    """Return only route-confirmed, adapter-supported picker values."""
+    return _reasoning_capability(model_id, provider_id, base_url)["efforts"]
 
 
 def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
@@ -4229,102 +4321,13 @@ def coerce_reasoning_effort_for_model(
     provider_id: str | None = None,
     base_url: str | None = None,
 ) -> str:
-    """Return the closest supported effort for the target model/provider."""
+    """Preserve the user's manual effort override; adapters own wire mapping.
+
+    Capability discovery must not erase controls on local/custom routes.
+    Only values outside the canonical vocabulary are dropped.
+    """
     raw = str(effort or "").strip().lower()
-    if not raw:
-        return ""
-    # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
-    # disabled at all — a stored 'none' must coerce to '' (provider default =
-    # thinking on) so streaming does not build disabled reasoning for a model
-    # that forces thinking on regardless. Checked BEFORE the generic 'none'
-    # early-return below so the forced-tier contract wins. (#6219 round-3)
-    if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
-        return ""
-    if raw == "none":
-        return "none"
-    if raw not in VALID_REASONING_EFFORTS:
-        return ""
-    supported = resolve_model_reasoning_efforts(
-        model_id,
-        provider_id=provider_id,
-        base_url=base_url,
-    )
-    # Hard provider ceilings must win regardless of what the sourced capability
-    # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
-    # models.dev / heuristics, and those can (a) return [] for an unrecognized
-    # model or (b) wrongly advertise 'max' for a provider
-    # whose native ladder tops out lower. _filter_reasoning_efforts_for_provider
-    # encodes the known ceilings (OpenAI-family GPT-5 before 5.6, Gemini, and
-    # pre-adaptive Anthropic all cap below 'max'); if it actively EXCLUDES the
-    # requested level, honor that ceiling and degrade down the ladder even when
-    # the sourced list is empty or (mistakenly) includes the level. This keeps a
-    # stored/CLI 'max' from reaching an adapter that would silently downgrade it
-    # worse than xhigh/high (Gemini→medium, legacy Claude manual-thinking→8k).
-    # GPT-5.6 is intentionally not capped. For providers with NO ceiling rule the
-    # filter returns the full list unchanged, so genuinely unknown models still
-    # preserve the configured effort (#3505 behavior).
-    ceiling = _filter_reasoning_efforts_for_provider(
-        list(VALID_REASONING_EFFORTS), str(model_id or ""), str(provider_id or "")
-    )
-    if ceiling and raw not in ceiling:
-        ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
-        try:
-            raw_idx = ladder.index(raw)
-        except ValueError:
-            raw_idx = None
-        if raw_idx is not None:
-            for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
-                if level in ceiling:
-                    return level
-    # An empty list is ambiguous: resolve_model_reasoning_efforts() returns []
-    # both for models KNOWN not to support reasoning AND for models we simply
-    # don't recognize (custom providers, aggregator-rewritten ids, brand-new
-    # releases). Coercion exists to avoid sending a level a KNOWN-incompatible
-    # model rejects (e.g. pre-5.6 GPT-5 'max', o1/o3/o4 above 'high') -
-    # those paths return a NON-empty clamped set, so the degrade ladder below
-    # still applies. When the set is empty we can't tell "unsupported" from
-    # "unknown", so preserve the user's configured effort verbatim where it is
-    # still valid. (#3505 review)
-    #
-    # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
-    # 2026-07-11): 'max' is ABOVE the universally-safe ceiling 'xhigh'. A
-    # genuinely unknown/custom provider will 400 on it. So when the
-    # capability list is empty AND the provider is not one we recognize as
-    # reasoning-capable, degrade 'max' -> 'xhigh' rather than send an unsupported
-    # supra-ceiling level. But do NOT degrade for a RECOGNIZED reasoning provider
-    # whose specific model id we simply couldn't resolve (e.g. claude-opus-latest,
-    # a brand-new adaptive id) — those genuinely support 'max', and the ceiling
-    # filter above already stripped it for any KNOWN-capped model. All other
-    # levels (minimal..xhigh) keep the conservative preserve-verbatim behavior.
-    #
-    # EXCEPTION for the ZAI native-endpoint gate: a pre-5.2 GLM model (incl. the
-    # forced-thinking GLM-4.7) is KNOWN not to accept reasoning_effort at all, so
-    # any stored level must coerce to "" (send no field) — NOT be preserved
-    # verbatim, which Z.AI would silently ignore. This keeps the value actually
-    # sent in agreement with the UI (which offers no options for these models).
-    if not supported:
-        if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
-            return ""
-        if raw == "max" and not _provider_known_reasoning_capable(provider_id):
-            return "xhigh"
-        return raw
-    if raw in supported:
-        return raw
-    # Degrade to the closest *lower* supported level instead of silently
-    # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
-    # target model caps below the configured effort. Never escalate.
-    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh..max
-    try:
-        raw_idx = ladder.index(raw)
-    except ValueError:
-        return raw
-    for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
-        if level in supported:
-            return level
-    # raw is below every supported level (shouldn't happen for a non-empty set
-    # that excludes raw, but be safe): preserve the configured effort rather
-    # than blank it.
-    return raw
+    return raw if raw in ("none", *VALID_REASONING_EFFORTS) else ""
 
 
 def get_reasoning_status(
@@ -4346,51 +4349,30 @@ def get_reasoning_status(
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
     effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
 
-    resolve_model = model_id
-    resolve_provider = provider_id
-    resolve_base_url = base_url
-    if not resolve_model:
-        model_cfg = config_data.get("model") or {}
-        if isinstance(model_cfg, dict):
-            resolve_model = str(model_cfg.get("default") or "").strip() or None
-            if not resolve_provider and model_cfg.get("provider"):
-                resolve_provider = str(model_cfg["provider"]).strip()
-            if not resolve_base_url and model_cfg.get("base_url"):
-                resolve_base_url = str(model_cfg["base_url"]).strip()
-
-    supported_efforts = resolve_model_reasoning_efforts(
-        resolve_model,
-        provider_id=resolve_provider,
-        base_url=resolve_base_url,
-    )
-    # supports_thinking_toggle: can the user turn thinking on/off at all? An
-    # effort-capable model obviously can. The ZAI gate separately exposes the
-    # toggle for GLM-4.5–5.1 (which accept `thinking: {"type": ...}` but NOT the
-    # `reasoning_effort` ladder), so the composer still renders an On/None control
-    # when supported_efforts is empty. Without this, returning [] for those models
-    # would hide the entire reasoning chip and silently regress the working
-    # thinking on/off control (#6219 round-2 review).
-    zai_thinking = _zai_glm_thinking_toggle_supported(
-        resolve_model, resolve_provider
-    )
-    supports_thinking_toggle = bool(supported_efforts) or (zai_thinking is True)
+    # Manual full-range picker, deliberately independent of provider discovery.
+    # Native clients use these legacy fields to decide what controls to render;
+    # they describe selectable overrides, not guaranteed native wire support.
+    picker_efforts = ["none", *VALID_REASONING_EFFORTS]
+    requested = str(effort_raw or "").strip().lower()
+    effective = coerce_reasoning_effort_for_model(requested)
+    note = "Manual override: provider adapters may translate or ignore levels; unsupported requests may be rejected. Default clears the override."
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
-        # Report the COERCED effort so boot/status/chip read paths agree with
-        # what streaming actually sends. (Codex review of the drop-max alignment.)
-        "reasoning_effort": coerce_reasoning_effort_for_model(
-            str(effort_raw or "").strip().lower(),
-            resolve_model,
-            provider_id=resolve_provider,
-            base_url=resolve_base_url,
-        ),
-        "supported_efforts": supported_efforts,
-        "supports_reasoning_effort": bool(supported_efforts),
-        # Whether the composer should render ANY reasoning control. True for any
-        # effort-capable model OR a ZAI GLM model that accepts the thinking
-        # toggle but not the effort ladder. False hides the chip entirely.
-        "supports_thinking_toggle": supports_thinking_toggle,
+        # User selection, before any provider-specific wire translation.
+        "reasoning_effort": effective,
+        "requested_reasoning_effort": requested,
+        "reasoning_capabilities_known": False,
+        "reasoning_capability_source": "manual_full_range",
+        "reasoning_selection_mode": "manual_full_range",
+        "reasoning_note": note,
+        "reasoning_options": [{"value": "", "label": "Default"}] + [
+            {"value": e, "label": "None" if e == "none" else e.capitalize()}
+            for e in picker_efforts
+        ],
+        "supported_efforts": picker_efforts,
+        "supports_reasoning_effort": True,
+        "supports_thinking_toggle": True,
     }
 
 
@@ -4501,7 +4483,7 @@ def set_reasoning_effort(
     """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
 
     Mirrors CLI ``/reasoning <level>``: same key, same valid values
-    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
+    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max`` | ``ultra``).
 
     An empty string is accepted as "clear the override" — it removes the
     ``agent.reasoning_effort`` key so the provider default takes effect. This is
@@ -4510,7 +4492,8 @@ def set_reasoning_effort(
     thinking back on after the user selected "None". Without this, the toggle
     would be one-way (off-only) for those models. (#6219 round-3)
 
-    Raises ``ValueError`` on any other unrecognised level so callers can 400.
+    All canonical levels are manual overrides for every route. Only unknown
+    vocabulary raises ``ValueError``; empty always clears the override.
     """
     raw = str(effort or "").strip().lower()
     if raw and raw != "none" and raw not in VALID_REASONING_EFFORTS:

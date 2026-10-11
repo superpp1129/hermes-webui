@@ -324,17 +324,14 @@ class TestSupportsThinkingToggleVisibility:
             f"the chip must stay visible for the On/None control: {out}"
         )
 
-    def test_empty_efforts_forced_thinking_hides_chip(self, driver_meta_path):
-        """GLM-4.7 (forced thinking): empty ladder + toggle=False → chip hides."""
+    def test_unknown_or_forced_metadata_keeps_manual_chip(self, driver_meta_path):
+        """Even a cached empty capability response must not hide manual controls."""
         out = _apply_meta(
             driver_meta_path,
             "",
             {"supported_efforts": [], "supports_thinking_toggle": False},
         )
-        assert out["display"] == "none", (
-            "glm-4.7 forces thinking on — neither toggle nor ladder should be "
-            f"offered; chip must hide: {out}"
-        )
+        assert out["display"] == ""
 
     def test_effort_ladder_stays_visible_regardless_of_toggle(self, driver_meta_path):
         """GLM-5.2 (full ladder): effort ladder present → chip stays visible
@@ -419,7 +416,8 @@ function makeEl() {
 }
 
 // Options mirror static/index.html's composerReasoningDropdown exactly.
-const options = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(makeOption);
+const html = fs.readFileSync(require('path').join(require('path').dirname(process.argv[2]), 'index.html'), 'utf8');
+const options = [...html.matchAll(/class="reasoning-option" data-effort="([^"]*)"/g)].map(m => makeOption(m[1]));
 const optionEls = options;
 
 const els = {
@@ -507,11 +505,7 @@ class TestTwoStateToggleControl:
         assert "none" in visible, (
             f"None (disable thinking) must be shown; got {visible}"
         )
-        # No effort levels for the thinking-only tier.
-        for level in ["minimal", "low", "medium", "high", "xhigh", "max"]:
-            assert level not in visible, (
-                f"thinking-tier must not show effort level {level}; got {visible}"
-            )
+        assert visible == ["Default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 
     def test_effort_tier_offers_default_none_and_ladder(self, driver_options_path):
         """GLM-5.2: full ladder + toggle → Default, None, AND all 6 levels."""
@@ -523,7 +517,7 @@ class TestTwoStateToggleControl:
         )
         assert "Default" in visible
         assert "none" in visible
-        for level in ["minimal", "low", "medium", "high", "xhigh", "max"]:
+        for level in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]:
             assert level in visible, f"effort tier must show {level}; got {visible}"
 
     def test_off_then_on_round_trip_options(self, driver_options_path):

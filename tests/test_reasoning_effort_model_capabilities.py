@@ -49,12 +49,8 @@ def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
     assert "max" not in efforts
 
 
-def test_openai_codex_max_effort_is_clamped_before_streaming():
-    assert cfg.coerce_reasoning_effort_for_model(
-        "max",
-        "gpt-5.5",
-        provider_id="openai-codex",
-    ) == "xhigh"
+def test_manual_codex_override_is_not_relabelled():
+    assert cfg.coerce_reasoning_effort_for_model("max", "gpt-5.5", provider_id="openai-codex") == "max"
 
 
 def test_openai_family_gpt56_models_expose_and_preserve_max():
@@ -72,20 +68,9 @@ def test_openai_family_gpt56_models_expose_and_preserve_max():
             ) == "max", f"{model} on {provider} must preserve max"
 
 
-def test_unsupported_xhigh_degrades_to_high_not_disabled():
-    # o1/o3/o4 on openai-codex cap at low/medium/high. A configured xhigh (or
-    # max) must clamp DOWN to the highest supported level (high), not silently
-    # disable reasoning by returning "".
-    assert cfg.coerce_reasoning_effort_for_model(
-        "xhigh",
-        "o3-mini",
-        provider_id="openai-codex",
-    ) == "high"
-    assert cfg.coerce_reasoning_effort_for_model(
-        "max",
-        "o3-mini",
-        provider_id="openai-codex",
-    ) == "high"
+def test_manual_o_series_override_is_preserved():
+    for effort in ("xhigh", "max"):
+        assert cfg.coerce_reasoning_effort_for_model(effort, "o3-mini", provider_id="openai-codex") == effort
 
 
 def test_coerce_never_escalates_above_configured_effort():
@@ -97,54 +82,22 @@ def test_coerce_never_escalates_above_configured_effort():
     ) == "low"
 
 
-def test_coerce_preserves_effort_for_unrecognized_model():
-    # #3505 review: resolve_model_reasoning_efforts() returns [] for BOTH
-    # known-unsupported AND simply-unrecognized models (custom providers,
-    # aggregator-rewritten ids, brand-new releases). Coercion must NOT silently
-    # drop a configured effort just because we don't recognize the model — that
-    # would be a behavior change vs sending it verbatim (master). Preserve the
-    # configured level for an empty/unknown capability set; the provider stays
-    # the final authority. The known-bad CLAMP paths return a NON-empty set, so
-    # they are unaffected (covered by the openai-codex tests above).
-    assert cfg.coerce_reasoning_effort_for_model(
-        "high",
-        "some-unknown-model-xyz",
-        provider_id="some-custom-provider",
-    ) == "high"
-    # #3505 default-deny refinement (maintainer 2026-07-11): 'max' is above the
-    # universally safe ceiling, so on an UNRECOGNIZED provider it degrades to
-    # xhigh (a truly-unknown provider would 400 on max). All OTHER levels still
-    # preserve verbatim below.
-    assert cfg.coerce_reasoning_effort_for_model(
-        "max",
-        "brand-new-model-2099",
-        provider_id="some-custom-provider",
-    ) == "xhigh"
-    # 'none' / unset still pass through unchanged for unknown models.
-    assert cfg.coerce_reasoning_effort_for_model(
-        "none", "some-unknown-model-xyz", provider_id="custom"
-    ) == "none"
-    assert cfg.coerce_reasoning_effort_for_model(
-        "", "some-unknown-model-xyz", provider_id="custom"
-    ) == ""
+def test_unknown_model_does_not_guess_effort_support():
+    for effort in ("high", "max", "none", ""):
+        assert cfg.coerce_reasoning_effort_for_model(effort, "unknown-model", provider_id="custom") == effort
 
 
-def test_github_copilot_gpt5_supports_reasoning_effort_levels():
-    efforts = cfg.resolve_model_reasoning_efforts(
-        "gpt-5.5",
-        provider_id="github-copilot",
-    )
-    assert "medium" in efforts
-    assert "high" in efforts
+def test_copilot_does_not_infer_controls_from_name():
+    capability = cfg._reasoning_capability("gpt-5.5", "github-copilot")
+    assert capability["efforts"] == []
+    assert capability["known"] is False
 
 
-def test_openrouter_anthropic_models_keep_reasoning_effort_levels():
-    efforts = cfg.resolve_model_reasoning_efforts(
-        "anthropic/claude-sonnet-4.5",
-        provider_id="openrouter",
-    )
-    assert "medium" in efforts
-    assert "high" in efforts
+def test_openrouter_uses_exact_catalog(monkeypatch):
+    import hermes_cli.models as models
+    monkeypatch.setattr(models, "openrouter_model_reasoning_capabilities",
+                        lambda *a, **k: {"supports_reasoning": True, "supported_efforts": ["low", "high"], "mandatory": True})
+    assert cfg.resolve_model_reasoning_efforts("anthropic/claude-sonnet-4.5", provider_id="openrouter") == ["low", "high"]
 
 
 def test_non_reasoning_http_models_hide_reasoning_effort_levels():
@@ -195,7 +148,7 @@ def test_provider_config_all_invalid_falls_through(monkeypatch):
             "zai-org/GLM-5.2",
             provider_id="wandb",
         )
-        assert result != []
+        assert result == []
         assert "bogus" not in result
         assert "typo" not in result
     finally:
@@ -391,121 +344,68 @@ def test_nested_route_deny_is_boundary_based_not_prefix_based():
 
 
 def test_get_reasoning_status_includes_supported_efforts(monkeypatch):
-    monkeypatch.setattr(
-        cfg,
-        "resolve_model_reasoning_efforts",
-        lambda *a, **k: ["low", "medium", "high"],
-    )
-    status = cfg.get_reasoning_status(
-        model_id="gpt-5.5",
-        provider_id="openai-codex",
-    )
-    assert status["supported_efforts"] == ["low", "medium", "high"]
+    monkeypatch.setattr(cfg, "_reasoning_capability", lambda *a, **k: {"known": True, "efforts": ["low"], "source": "test"})
+    status = cfg.get_reasoning_status(model_id="gpt-5.5", provider_id="openai-codex")
+    assert status["supported_efforts"] == ["none", *cfg.VALID_REASONING_EFFORTS]
     assert status["supports_reasoning_effort"] is True
+    assert status["supports_thinking_toggle"] is True
 
 
-def test_get_reasoning_status_for_reasoning_capable_model_has_no_max():
-    status = cfg.get_reasoning_status(
-        model_id="gpt-5.5",
-        provider_id="openai-codex",
-    )
-    assert status["supported_efforts"] == ["minimal", "low", "medium", "high", "xhigh"]
-    assert status["supports_reasoning_effort"] is True
-    assert "max" not in status["supported_efforts"]
+def test_manual_status_includes_max_and_ultra():
+    status = cfg.get_reasoning_status(model_id="gpt-5.5", provider_id="openai-codex")
+    assert status["supported_efforts"] == ["none", *cfg.VALID_REASONING_EFFORTS]
+    assert "ultra" in status["supported_efforts"]
 
 
-def test_get_reasoning_status_coerces_stale_max_to_xhigh(monkeypatch):
-    """A previously-saved `agent.reasoning_effort: max` (no longer a valid effort)
-    must be reported as the coerced `xhigh`, not the raw stale `max`, so the
-    boot/status/chip read paths agree with what streaming actually sends."""
-    monkeypatch.setattr(
-        cfg,
-        "_load_yaml_config_file",
-        lambda *a, **k: {"agent": {"reasoning_effort": "max"}},
-    )
-    status = cfg.get_reasoning_status(
-        model_id="gpt-5.5",
-        provider_id="openai-codex",
-    )
-    assert status["reasoning_effort"] == "xhigh"
-    assert status["reasoning_effort"] != "max"
+def test_get_reasoning_status_does_not_duplicate_configured_none(monkeypatch):
+    monkeypatch.setattr(cfg, "cfg", {"providers": {"test": {"reasoning_efforts": ["none", "none", "high"]}}})
+    status = cfg.get_reasoning_status(model_id="test", provider_id="test")
+    assert status["supported_efforts"].count("none") == 1
+    assert status["supported_efforts"] == ["none", *cfg.VALID_REASONING_EFFORTS]
 
 
-def test_max_effort_degrades_to_xhigh_for_gemini():
-    # Gemini's native ladder tops out below 'max'; its adapter would silently
-    # treat an unknown 'max' as medium. A stored/CLI 'max' must degrade to xhigh
-    # (the highest supported), not fall through to a worse level. (#4627 gate)
+def test_manual_status_preserves_saved_preference(monkeypatch):
+    monkeypatch.setattr(cfg, "_load_yaml_config_file", lambda *a, **k: {"agent": {"reasoning_effort": "max"}})
+    status = cfg.get_reasoning_status(model_id="gpt-5.5", provider_id="openai-codex")
+    assert status["reasoning_effort"] == "max"
+    assert status["requested_reasoning_effort"] == "max"
+    assert "Manual override" in status["reasoning_note"]
+
+
+def test_gemini_does_not_offer_alias_levels():
     for model in ("gemini-3-pro", "gemini-3-flash"):
-        assert cfg.coerce_reasoning_effort_for_model(
-            "max", model_id=model, provider_id="gemini"
-        ) == "xhigh", f"{model} max must degrade to xhigh"
+        assert cfg.coerce_reasoning_effort_for_model("max", model_id=model, provider_id="gemini") == "max"
+        assert "xhigh" not in cfg.resolve_model_reasoning_efforts(model, provider_id="gemini")
 
 
-def test_max_effort_degrades_to_xhigh_for_pre_adaptive_anthropic():
-    # Pre-adaptive Claude (3.7 / 4.0-4.5) uses manual thinking whose budget table
-    # lacks 'max' and falls back to 8k; 'max' must degrade to xhigh instead. (#4627 gate)
-    for model in (
-        "claude-3-7-sonnet", "claude-sonnet-4-5", "claude-haiku-4-5",
-        # date-stamped legacy IDs the Anthropic adapter uses
-        "claude-3-opus-20240229", "claude-3-5-sonnet-20241022",
-        "claude-sonnet-4-20250514", "claude-opus-4-20250514",
-    ):
-        assert cfg.coerce_reasoning_effort_for_model(
-            "max", model_id=model, provider_id="anthropic"
-        ) == "xhigh", f"{model} max must degrade to xhigh"
+def test_legacy_anthropic_does_not_offer_max():
+    for model in ("claude-3-7-sonnet", "claude-sonnet-4-5", "claude-haiku-4-5",
+                  "claude-3-opus-20240229", "claude-3-5-sonnet-20241022",
+                  "claude-sonnet-4-20250514", "claude-opus-4-20250514"):
+        assert cfg.coerce_reasoning_effort_for_model("max", model_id=model, provider_id="anthropic") == "max"
 
 
-def test_max_effort_preserved_for_adaptive_anthropic_and_deepseek():
-    # Adaptive Claude (4.6+) and DeepSeek genuinely support 'max' — it must NOT degrade.
-    for model in ("claude-opus-4.6", "claude-sonnet-4.6", "claude-opus-4.7", "claude-opus-latest"):
-        assert cfg.coerce_reasoning_effort_for_model(
-            "max", model_id=model, provider_id="anthropic"
-        ) == "max", f"{model} must preserve max"
-    assert cfg.coerce_reasoning_effort_for_model(
-        "max", model_id="deepseek-reasoner", provider_id="deepseek"
-    ) == "max"
+def test_native_capabilities_do_not_bleed_into_other_routes():
+    for model in ("claude-opus-4.6", "claude-sonnet-4.6", "claude-opus-4.7"):
+        assert cfg.coerce_reasoning_effort_for_model("max", model_id=model, provider_id="anthropic") == "max"
+    assert cfg.coerce_reasoning_effort_for_model("max", model_id="deepseek-reasoner", provider_id="deepseek") == "max"
 
 
-def test_max_degrades_for_pre_gpt56_and_o_series_across_openai_family_lanes():
-    # GPT-5 models before 5.6 cap at xhigh, while o1/o3/o4 cap at high, across
-    # direct OpenAI, ChatGPT/Codex, and Azure provider aliases.
+def test_unsupported_max_not_relabelled_across_openai_routes():
     for provider in OPENAI_FAMILY_PROVIDERS:
-        for model in ("gpt-5", "gpt-5.1", "gpt-5.5"):
-            assert cfg.coerce_reasoning_effort_for_model(
-                "max", model_id=model, provider_id=provider
-            ) == "xhigh", f"{model} on {provider} must degrade max->xhigh"
-        for model in ("o1", "o3-mini", "o4-mini"):
-            assert cfg.coerce_reasoning_effort_for_model(
-                "max", model_id=model, provider_id=provider
-            ) == "high", f"{model} on {provider} must degrade max->high"
+        for model in ("gpt-5", "gpt-5.1", "gpt-5.5", "o1", "o3-mini", "o4-mini"):
+            assert cfg.coerce_reasoning_effort_for_model("max", model_id=model, provider_id=provider) == "max"
 
 
-def test_max_degrades_for_azure_bedrock_hosted_legacy_claude():
-    # Legacy Claude via Azure Foundry / Bedrock is still pre-adaptive; the ceiling
-    # follows the model, not just the provider name. (#4627 re-gate)
-    for prov in ("azure-foundry", "bedrock"):
-        assert cfg.coerce_reasoning_effort_for_model(
-            "max", model_id="claude-sonnet-4-20250514", provider_id=prov
-        ) == "xhigh", f"legacy Claude on {prov} must degrade max->xhigh"
-    # adaptive Claude via azure preserves max
-    assert cfg.coerce_reasoning_effort_for_model(
-        "max", model_id="claude-opus-4.6", provider_id="azure-foundry"
-    ) == "max"
+def test_hosted_claude_requires_its_own_route_capabilities():
+    for provider in ("azure-foundry", "bedrock"):
+        for model in ("claude-sonnet-4-20250514", "claude-opus-4.6"):
+            assert cfg.coerce_reasoning_effort_for_model("max", model_id=model, provider_id=provider) == "max"
 
 
-def test_max_degrades_on_unknown_provider_but_other_levels_preserved():
-    # #3505 default-deny refinement (maintainer call 2026-07-11): 'max' is above
-    # the universally safe ceiling, so an unknown/custom provider (empty capability list)
-    # must degrade 'max'->'xhigh' rather than send an unsupported level — while all
-    # other levels keep the conservative preserve-verbatim behavior.
-    assert cfg.coerce_reasoning_effort_for_model(
-        "max", model_id="some-unknown-model", provider_id="customprovider"
-    ) == "xhigh"
-    # other levels still preserved verbatim for an unknown provider
-    for eff in ("minimal", "low", "medium", "high", "xhigh"):
-        assert cfg.coerce_reasoning_effort_for_model(
-            eff, model_id="some-unknown-model", provider_id="customprovider"
-        ) == eff, f"{eff} must be preserved verbatim on unknown provider (#3505)"
+def test_unknown_provider_preserves_manual_overrides():
+    for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
+        assert cfg.coerce_reasoning_effort_for_model(effort, model_id="unknown", provider_id="customprovider") == effort
 
 
 def test_max_only_offered_in_ui_when_actually_supported():
@@ -513,7 +413,7 @@ def test_max_only_offered_in_ui_when_actually_supported():
     # for models whose supported list includes it (adaptive Claude, DeepSeek), and
     # is absent for legacy/capped models and unknown providers.
     assert "max" in cfg.resolve_model_reasoning_efforts("claude-opus-4.6", provider_id="anthropic")
-    assert "max" in cfg.resolve_model_reasoning_efforts("deepseek-reasoner", provider_id="deepseek")
+    assert "max" not in cfg.resolve_model_reasoning_efforts("deepseek-reasoner", provider_id="deepseek")
     assert "max" not in cfg.resolve_model_reasoning_efforts("claude-sonnet-4-5", provider_id="anthropic")
     assert "max" not in cfg.resolve_model_reasoning_efforts("gpt-5.1", provider_id="openai")
     assert "max" not in cfg.resolve_model_reasoning_efforts("gemini-3-pro", provider_id="gemini")

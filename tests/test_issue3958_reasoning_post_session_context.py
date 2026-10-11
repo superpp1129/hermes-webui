@@ -26,13 +26,13 @@ def test_set_reasoning_effort_returns_status_for_explicit_model(tmp_path, monkey
 
     seen = {}
 
-    def fake_resolve(model_id, provider_id=None, base_url=None):
-        seen["args"] = (model_id, provider_id, base_url)
-        if model_id == "claude-opus-4-7":
-            return ["minimal", "low", "medium", "high", "xhigh", "max"]
-        return []
+    real_status = cfg.get_reasoning_status
 
-    monkeypatch.setattr(cfg, "resolve_model_reasoning_efforts", fake_resolve)
+    def record_status(*, model_id=None, provider_id=None, base_url=None):
+        seen["args"] = (model_id, provider_id, base_url)
+        return real_status(model_id=model_id, provider_id=provider_id, base_url=base_url)
+
+    monkeypatch.setattr(cfg, "get_reasoning_status", record_status)
 
     status = cfg.set_reasoning_effort(
         "high",
@@ -43,12 +43,14 @@ def test_set_reasoning_effort_returns_status_for_explicit_model(tmp_path, monkey
     assert seen["args"] == ("claude-opus-4-7", "anthropic", None)
     assert status["reasoning_effort"] == "high"
     assert status["supported_efforts"] == [
+        "none",
         "minimal",
         "low",
         "medium",
         "high",
         "xhigh",
         "max",
+        "ultra",
     ]
 
 
