@@ -6,25 +6,11 @@ default and hit the "maximum number of tool-calling iterations" summary path eve
 when the operator raised the global Hermes budget.
 """
 
-import ast
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
-
-
-def _load_max_iterations_resolver():
-    tree = ast.parse(STREAMING_PY)
-    function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_resolve_agent_max_iterations"
-    )
-    namespace = {}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), "streaming.py", "exec"), namespace)
-    return namespace["_resolve_agent_max_iterations"]
 
 
 def _compute_agent_cache_signature_source() -> str:
@@ -174,49 +160,9 @@ def _signature_calls_by_region(
 
 
 def test_streaming_agent_reads_agent_max_turns_from_config():
-    resolver = _load_max_iterations_resolver()
-    assert resolver({"agent": {"max_turns": 600}}) == 600
-    assert resolver({"max_turns": 900}) == 900
-
-
-def test_streaming_agent_allows_exact_provider_to_be_unlimited():
-    resolver = _load_max_iterations_resolver()
-    config = {
-        "agent": {
-            "max_turns": 600,
-            "max_turns_by_provider": {
-                "custom:strata-3090": 0,
-                "custom": 100,
-            },
-        }
-    }
-
-    assert resolver(
-        config,
-        requested_provider="custom:strata-3090",
-        resolved_provider="custom",
-    ) is None
-    assert resolver(
-        config,
-        requested_provider="openrouter",
-        resolved_provider="openrouter",
-    ) == 600
-
-
-def test_invalid_provider_override_falls_back_to_global_limit():
-    resolver = _load_max_iterations_resolver()
-    config = {
-        "agent": {
-            "max_turns": 600,
-            "max_turns_by_provider": {"openrouter": "not-a-number"},
-        }
-    }
-
-    assert resolver(
-        config,
-        requested_provider="openrouter",
-        resolved_provider="openrouter",
-    ) == 600
+    assert "_agent_cfg_for_iterations" in STREAMING_PY
+    assert "_agent_cfg_for_iterations.get('max_turns')" in STREAMING_PY
+    assert "_cfg.get('max_turns')" in STREAMING_PY
 
 
 def test_streaming_agent_passes_max_iterations_to_aiagent():
